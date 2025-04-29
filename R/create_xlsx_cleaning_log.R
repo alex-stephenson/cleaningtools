@@ -113,6 +113,7 @@ create_formated_wb <- function(write_list,
 #' (default is FALSE)
 #' @param sm_dropdown_type Dropdown list options for select multiple questions:
 #' "numerical" (1/0) or "logical" (TRUE/FALSE). The default is logical.
+#' @param use_others Whether to include the parent values in recode_other clog issues (TRUE / FALSE). Defaults to FALSE. In order to work, other answer options must have the name 'other' in the choices sheet.
 #' @param kobo_survey Kobo survey dataframe
 #' @param kobo_choices Kobo choices dataframe
 #' @param output_path Output path. Default is NULL which will return a workbook instead of an excel file.
@@ -160,6 +161,7 @@ create_xlsx_cleaning_log <- function(write_list,
                                      body_front = "Arial Narrow",
                                      body_front_size = 11,
                                      use_dropdown = F,
+                                     use_others = F,
                                      sm_dropdown_type = NULL,
                                      kobo_survey = NULL,
                                      kobo_choices = NULL,
@@ -188,7 +190,9 @@ create_xlsx_cleaning_log <- function(write_list,
 
   tryCatch(
     if (!is.null(kobo_survey) & !is.null(kobo_choices) & use_dropdown == TRUE) {
-      data.val <- create_validation_list(kobo_choices, kobo_survey |> dplyr::filter(!stringr::str_detect(pattern = "(begin|end)(\\s+|_)group", type)))
+      data.val <- create_validation_list(kobo_choices,
+                                         kobo_survey |> dplyr::filter(!stringr::str_detect(pattern = "(begin|end)(\\s+|_)group", type)),
+                                         others = use_others)
     },
     error = function(e) {
       warning("Validation list was not created")

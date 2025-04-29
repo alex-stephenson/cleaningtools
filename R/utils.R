@@ -125,6 +125,7 @@ verify_valid_choices <- function(kobo_choices) {
 #'        Expected to have at least the columns `list_name` and `name`.
 #' @param tool A dataframe representing the Kobo survey sheet.
 #'        Expected to have at least the columns `type` and `name`.
+#' @param others Whether 'Others' should be included in the validation list. Defaults to FALSE.
 #'
 #' @return A dataframe where each column corresponds to a choice list for a specific question.
 #'         Each row contains a valid choice for the question.
@@ -134,7 +135,7 @@ verify_valid_choices <- function(kobo_choices) {
 #' # validation_list <- create_validation_list(choices, tool)
 #'
 #' @export
-create_validation_list <- function(choices, tool) {
+create_validation_list <- function(choices, tool, others = F) {
   new_lists <- list(
     c("change_type_validation", "change_response;\nblank_response;\nremove_survey;\nno_action"),
     c("binaries_sm_options_lgl", "FALSE;\nTRUE"),
@@ -148,7 +149,17 @@ create_validation_list <- function(choices, tool) {
 
   choicelist <- new_lists %>%
     dplyr::bind_rows(create_formatted_choices(choices, tool) %>%
-      dplyr::select(name, choices))
+                       dplyr::select(name, choices))
+
+  if (others) {
+
+    extra = create_other_df(tool = tool, choices = choices)
+
+    choicelist <- dplyr::bind_rows(
+      choicelist,
+      extra %>% dplyr::rename(name = other_question)
+    )
+  }
 
   choice_validation <- choicelist %>%
     unique() %>%
@@ -272,3 +283,88 @@ coerce_to_character <- function(x) {
   format(x, scientific = F, justify = "none", trim = T) %>%
     dplyr::na_if("NA")
 }
+
+
+
+#' Create 'Other' Question Mapping Table
+#'
+#' This function identifies text questions in an XLSForm tool that are used to capture "other" responses
+#' (i.e., follow-up text entries when 'other' is selected from a parent select question), and constructs
+#' a mapping between these "other" text questions and the choices of their parent select questions.
+#'
+#' It returns a data frame where each row represents an "other" text question, and the corresponding
+#' answer choices (excluding the 'other' option itself) from the parent select question. This is subsequently used to define the drop down options.
+#'
+#' @param tool A data frame representing the `survey` sheet from an XLSForm. Must contain columns `type`, `name`, and `relevant`.
+#' @param choices A data frame representing the `choices` sheet from an XLSForm. Must contain columns `list_name` and `name`.
+#'
+#' @return A data frame with two columns:
+#' \describe{
+#'   \item{other_question}{The name of the "other" text question.}
+#'   \item{choices}{A semicolon-separated string of answer choices from the parent select question (excluding "other").}
+#' }
+#'
+#' @details
+#' This function assumes that "other" questions are identifiable by a `relevant` expression ending in `'other')`,
+#' and that the parent question is referenced inside curly brackets (`{}`) in the relevant column.
+#'
+#' The function will throw an error if no valid "other" question mappings are found.
+#'
+#' @examples
+#' \dontrun{
+#' survey <- readxl::read_excel("myform.xlsx", sheet = "survey")
+#' choices <- readxl::read_excel("myform.xlsx", sheet = "choices")
+#' create_other_df(tool = survey, choices = choices)
+#' }
+#'
+#' @importFrom dplyr filter mutate select bind_rows left_join
+#' @importFrom stringr str_detect str_extract str_remove_all str_split str_split_i
+#' @export
+create_other_df <- function(tool, choices) {
+
+  # Step 1: Identify relevant 'other' text questions and their parent question names
+  other_text_questions <- tool %>%
+    dplyr::filter(type == "text", stringr::str_detect(relevant, "'other'\\)\\s*$")) %>%
+    dplyr::mutate(
+      parent_question = stringr::str_extract(relevant, "\\{([A-Za-z0-9_]+)\\}") %>%
+        stringr::str_remove_all("\\{|\\}")
+    )
+
+  # Step 2: Get list names for the parent questions
+  parent_questions <- tool %>%
+    dplyr::filter(stringr::str_detect(type, "select")) %>%
+    dplyr::mutate(list_name = stringr::str_split_i(type, " ", 2)) %>%
+    dplyr::filter(name %in% other_text_questions$parent_question)
+
+  # Step 3: Filter choices to only relevant list_names
+  relevant_choices <- choices %>%
+    dplyr::filter(list_name %in% parent_questions$list_name)
+
+  # Step 4: Combine everything into wide format: other question ~ its 'other' answer options
+  questions_and_answers <- parent_questions %>%
+    # parent_questions has: name (parent) and list_name
+    dplyr::left_join(
+      other_text_questions %>%
+        dplyr::select(other_question = name, parent_question),
+      by = c("name" = "parent_question")
+    ) %>%
+    dplyr::left_join(
+      choices %>% dplyr::rename(answer_name = name),
+      by = "list_name"
+    ) %>%
+    dplyr::filter(answer_name != 'other') %>%
+    dplyr::group_by(other_question) %>%
+    dplyr::summarise(
+      choices = paste(answer_name, collapse = ";\n"),
+      .groups = "drop"
+    )
+
+  if (nrow(questions_and_answers) == 0) {
+    stop("No 'other' questions with matching choices found.")
+  }
+
+  return(questions_and_answers)
+}
+
+
+
