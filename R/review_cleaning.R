@@ -66,8 +66,6 @@ create_cleaning_log <- function(raw_dataset,
     )
   }
 
-
-
   # check variable name [removed from clean data] ---------------------------
 
   if (check_for_variable_name == T) {
@@ -154,7 +152,6 @@ create_cleaning_log <- function(raw_dataset,
         check$comment <- "An alteration was performed"
         return(check)
       }
-      message(x)
     }, clean_dataset = clean_dataset, raw_dataset = raw_dataset) %>% do.call(rbind, .)
 
 
@@ -180,10 +177,10 @@ create_cleaning_log <- function(raw_dataset,
         check$comment <- "NA changed to value"
         return(check)
       }
-      message(x)
     }, clean_dataset = clean_dataset, raw_dataset = raw_dataset) %>% do.call(rbind, .)
 
   ############################# blank_response ############################################
+
   log[["blank_response"]] <-
     lapply(varlist, function(x, clean_dataset, raw_dataset) {
       check <-
@@ -203,7 +200,6 @@ create_cleaning_log <- function(raw_dataset,
         check$comment <- "changed to NA"
         return(check)
       }
-      message(x)
     }, clean_dataset = clean_dataset, raw_dataset = raw_dataset) %>% do.call(rbind, .)
 
   all_log <- do.call(dplyr::bind_rows, log)

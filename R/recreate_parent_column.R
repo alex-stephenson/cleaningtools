@@ -75,210 +75,100 @@ auto_sm_parent_children <- function(dataset, sm_separator = ".") {
 #' )
 #' recreate_parent_column(dataset = test_data, uuid_column = "uuid", sm_separator = ".")
 #'
-recreate_parent_column <- function(dataset,
-                                   uuid_column = "uuid",
-                                   kobo_survey = NULL,
-                                   kobo_choices = NULL,
-                                   sm_separator = ".",
-                                   cleaning_log_to_append = NULL) {
-  checked_data <- dataset
+recreate_parent_column <- function(dataset, uuid_column = "uuid", kobo_survey = NULL,
+                                   kobo_choices = NULL, sm_separator = ".", cleaning_log_to_append = NULL) {
+  require(dplyr)
+  require(tidyr)
+  require(stringr)
+  require(purrr)
 
+  checked_data <- dataset
   initial_order <- names(dataset)
 
   if (is.null(kobo_survey)) {
     old_name <- names(dataset)
-    number_of_separator <- names(dataset) |>
-      stringr::str_count(pattern = paste0("\\", sm_separator)) |>
-      max(na.rm = T)
-    for (i in 1:number_of_separator) {
-      names(dataset) <-
-        sub(paste0("(\\", sm_separator, ".*?)\\", sm_separator),
-            "\\1_",
-            names(dataset))
+    number_of_separator <- max(str_count(names(dataset), fixed(sm_separator)), na.rm = TRUE)
+    for (i in seq_len(number_of_separator)) {
+      names(dataset) <- sub(paste0("(\\", sm_separator, ".*?)\\", sm_separator), "\\1_", names(dataset))
     }
-
-    cols_order <- dataset %>% names()
-
-
-    difference_df <- dplyr::tibble(old_name = old_name,
-                                   new_name = cols_order) |> dplyr::filter(old_name != new_name)
-
-    if (nrow(difference_df) > 0) {
-      warning(
-        "Column(s) names are renamed as multiple separators are found in dataset column names. Please see the above table with the new name."
-      )
-
-      print(difference_df)
+    cols_order <- names(dataset)
+    name_diff <- tibble(old_name = old_name, new_name = cols_order) %>% filter(old_name != new_name)
+    if (nrow(name_diff) > 0) {
+      warning("Column names were renamed due to multiple separators. See changes:")
+      print(name_diff)
     }
-
-
-    select_multiple <-
-      auto_sm_parent_children(dataset, sm_separator = sm_separator)
-  }
-
-  if (!is.null(kobo_survey)) {
-    choice_to_join <- kobo_choices |> dplyr::select(list_name, name)
-
-    select_multiple <- kobo_survey |>
-      dplyr::filter(grepl("select_multiple", type)) |>
-      dplyr::select(type, name) |>
-      dplyr::mutate(type = stringr::str_replace_all(type, "select_multiple ", "")) |>
-      dplyr::rename(list_name = type,
-                    sm_parent = name) |>
-      dplyr::left_join(choice_to_join, multiple = "all", by = "list_name") |>
-      dplyr::mutate(sm_child = paste0(sm_parent, sm_separator, name)) |>
-      dplyr::select(sm_parent, sm_child)
-
-    missing_column <-
-      select_multiple$sm_child[!select_multiple$sm_child %in% names(dataset)]
-
-    if (length(missing_column) > 0) {
-      print(missing_column)
-      warning(paste0(
-        "Ignoring the above column(s) as they do not exist in the dataset."
-      ))
+    select_multiple <- auto_sm_parent_children(dataset, sm_separator = sm_separator)
+  } else {
+    sm_raw <- kobo_survey %>% filter(str_detect(type, "^select_multiple ")) %>%
+      transmute(list_name = str_remove(type, "select_multiple "), sm_parent = name)
+    sm_choices <- sm_raw %>% left_join(kobo_choices, by = "list_name", relationship = "many-to-many") %>%
+      transmute(sm_parent, sm_child = paste0(sm_parent, sm_separator, name))
+    missing <- setdiff(sm_choices$sm_child, names(dataset))
+    if (length(missing) > 0) {
+      warning("Some SM child columns not found in dataset:")
+      print(missing)
     }
-    select_multiple <-
-      select_multiple |> dplyr::filter(sm_child %in% names(dataset))
-  }
-
-  if (nrow(select_multiple) > 0) {
-    select_multiple_list <- list()
-
-    for (i in unique(select_multiple$sm_parent)) {
-      select_multi_single <-
-        select_multiple %>% dplyr::filter(sm_parent == i)
-      concat_col <- select_multi_single$sm_parent %>% unique()
-      choice_cols <- select_multi_single$sm_child %>% unique()
-
-      df_only_cols <-
-        dataset %>% dplyr::select(dplyr::all_of(choice_cols),
-                                  dplyr::all_of(uuid_column))
-
-      pivot_long <-
-        df_only_cols %>% dplyr::mutate_at(names(df_only_cols), as.character)
-
-      corrected_df <- pivot_long %>%
-        tidyr::pivot_longer(
-          cols = !dplyr::all_of(uuid_column),
-          names_to = "cols",
-          values_to = "value"
-          ) %>%
-        dplyr::filter(value == 1 |
-                        value == TRUE |
-                        value == "1" | value == "TRUE") %>%
-        dplyr::group_by(!!rlang::sym(uuid_column)) %>%
-        dplyr::summarise(!!rlang::sym(concat_col) := paste0(cols, collapse = " "))
-
-      corrected_df[[concat_col]] <-
-        corrected_df[[concat_col]] %>% stringr::str_replace_all(paste0(concat_col, "."), "")
-
-      ### In some surveys, options are the same but the order is different.
-      ### The function would changed it  and later flags changes while it is this function
-      ### that changed the order.
-      ### I don't know why the order is different than the order of the columns,
-      ### possible options: the choices order changed, the fill in order
-      initial_values <- dataset %>%
-        dplyr::select(dplyr::all_of(c(uuid_column,
-                                      concat_col)))
-
-      verification_initial_df <- initial_values %>%
-        dplyr::left_join(corrected_df, by = uuid_column, suffix = c("_initial", "_corrected"))
-
-      concat_col_initial <- paste0(concat_col,"_initial")
-      concat_col_corrected <- paste0(concat_col,"_corrected")
-
-      verification_df <- verification_initial_df %>%
-        tidyr::separate_wider_delim(cols = c(!!dplyr::sym(concat_col_initial),
-                                             !!dplyr::sym(concat_col_corrected)),
-                                    delim = " ",
-                                    too_few = "align_start",
-                                    names_sep = "__")
-
-      names_initial <- verification_df %>% names() %>% grep(concat_col_initial, value = T, x=.)
-      names_corrected <- verification_df %>% names() %>% grep(concat_col_corrected, value = T, x=.)
-
-      verification_df <- verification_df %>%
-        dplyr::rowwise() %>%
-        dplyr::mutate(
-          old_in_new = all(dplyr::c_across(dplyr::all_of(names_initial)) %in% dplyr::c_across(dplyr::all_of(names_corrected))),
-          new_in_old = all(dplyr::c_across(dplyr::all_of(names_corrected)) %in% dplyr::c_across(dplyr::all_of(names_initial))),
-          all_in = old_in_new & new_in_old
-        ) %>%
-        dplyr::ungroup()
-
-      final_df <- verification_initial_df %>%
-        dplyr::left_join(dplyr::select(verification_df, dplyr::all_of(c(uuid_column, "all_in")))) %>%
-        dplyr::mutate(!!dplyr::sym(concat_col):= dplyr::case_when(all_in ~ !!dplyr::sym(concat_col_initial),
-                                                          !all_in ~ !!dplyr::sym(concat_col_corrected)))
-
-      final_df <- final_df %>%
-        dplyr::select(dplyr::all_of(c(uuid_column,
-                                      concat_col)))
-
-      # Get the final values to the select_multiple_list
-      select_multiple_list[[concat_col]] <- final_df
-    }
-
-    final_df_for_export <-
-      purrr::reduce(select_multiple_list, dplyr::full_join, by = uuid_column)
-    concat_col_names_from_fina_export <- final_df_for_export %>%
-      dplyr::select(!dplyr::all_of(uuid_column)) %>%
-      names()
-
-    data_with_fix_concat <- dataset %>%
-      dplyr::select(-dplyr::all_of(concat_col_names_from_fina_export)) %>%
-      dplyr::left_join(final_df_for_export, by = uuid_column)
-
-    if (is.null(kobo_survey)) {
-      data_with_fix_concat <-
-        data_with_fix_concat %>% dplyr::select(dplyr::all_of(cols_order))
-    }
-    if (!is.null(kobo_survey)) {
-      data_with_fix_concat <-
-        data_with_fix_concat %>% dplyr::select(dplyr::all_of(initial_order))
-    }
-
-    correction_parent_sm_log <- create_cleaning_log(
-      raw_dataset = checked_data,
-      raw_dataset_uuid_column = uuid_column,
-      clean_dataset = data_with_fix_concat,
-      clean_dataset_uuid_column = uuid_column
-    )
-    if ("comment" %in% names(correction_parent_sm_log)) {
-      correction_parent_sm_log <- correction_parent_sm_log %>%
-        dplyr::mutate(
-          comment = gsub(
-            "An alteration was performed",
-            "Parent column changed to match children columns",
-            comment),
-          comment = gsub(
-            "changed to NA",
-            "changed to NA with recreate_parent_column correction, all value are FALSE",
-            comment)
-          )
-    }
-
-    if (!is.null(cleaning_log_to_append)) {
-      list_to_return <- list(
-        data_with_fix_concat = data_with_fix_concat,
-        cleaning_log = dplyr::bind_rows(cleaning_log_to_append,
-                                        correction_parent_sm_log)
-      )
-
-    } else {
-      list_to_return <- list(data_with_fix_concat = data_with_fix_concat,
-                             correction_parent_sm_log = correction_parent_sm_log)
-    }
+    select_multiple <- sm_choices %>% filter(sm_child %in% names(dataset))
   }
 
   if (nrow(select_multiple) == 0) {
-    correction_parent_sm_log <- data.frame(uuid = "all",
-                                           comment = "No choice multiple questions/Nothing has changed")
-    list_to_return <- list(data_with_fix_concat = dataset,
-                           correction_parent_sm_log = correction_parent_sm_log)
+    correction_log <- tibble(!!uuid_column := "all", comment = "No select_multiple questions detected")
+    return(list(data_with_fix_concat = dataset, correction_parent_sm_log = correction_log))
   }
 
-  return(list_to_return)
+  reconstructed_list <- select_multiple %>% group_split(sm_parent) %>% map(function(df) {
+    parent <- unique(df$sm_parent)
+    child_cols <- df$sm_child
+    long_df <- dataset %>%
+      select(all_of(c(uuid_column, parent, child_cols))) %>%
+      pivot_longer(cols = all_of(child_cols), names_to = "child", values_to = "value") %>%
+      filter(value %in% c("1", 1, TRUE, "TRUE")) %>%
+      mutate(child_clean = str_remove(child, paste0("^", fixed(parent), fixed(sm_separator)))) %>%
+      group_by(uuid) %>%
+      summarise(
+        orig = list(unique(na.omit(.data[[parent]]))),
+        new_tokens = list(child_clean),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        orig_tokens = map(orig, ~ str_split(.x, "\\s+")[[1]]),
+        same_set = map2_lgl(orig_tokens, new_tokens, ~ setequal(.x, .y)),
+        new_final = map2_chr(same_set, seq_along(orig), ~ {
+          if (.x) orig[[.y]] else paste(new_tokens[[.y]], collapse = " ")
+        })
+      ) %>%
+      transmute(!!parent := new_final, !!uuid_column := .data[[uuid_column]])
+  })
 
+
+  final_parents <- reduce(reconstructed_list, full_join, by = uuid_column)
+  parent_names <- unique(select_multiple$sm_parent)
+  dataset_cleaned <- dataset %>% select(-any_of(parent_names)) %>% left_join(final_parents, by = uuid_column)
+  dataset_cleaned <- dataset_cleaned %>% select(all_of(initial_order))
+
+  correction_log <- create_cleaning_log(
+    raw_dataset = checked_data,
+    raw_dataset_uuid_column = uuid_column,
+    clean_dataset = dataset_cleaned,
+    clean_dataset_uuid_column = uuid_column
+  )
+
+  if ("comment" %in% names(correction_log)) {
+    correction_log <- correction_log %>% mutate(
+      comment = str_replace_all(comment, "An alteration was performed", "Parent column changed to match children columns"),
+      comment = str_replace_all(comment, "changed to NA", "changed to NA with recreate_parent_column correction, all value are FALSE")
+    )
+  }
+
+  if (!is.null(cleaning_log_to_append)) {
+    return(list(
+      data_with_fix_concat = dataset_cleaned,
+      cleaning_log = bind_rows(cleaning_log_to_append, correction_log)
+    ))
+  } else {
+    return(list(
+      data_with_fix_concat = dataset_cleaned,
+      correction_parent_sm_log = correction_log
+    ))
+  }
 }
